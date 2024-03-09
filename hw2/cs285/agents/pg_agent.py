@@ -10,20 +10,20 @@ from torch import nn
 
 class PGAgent(nn.Module):
     def __init__(
-        self,
-        ob_dim: int,
-        ac_dim: int,
-        discrete: bool,
-        n_layers: int,
-        layer_size: int,
-        gamma: float,
-        learning_rate: float,
-        use_baseline: bool,
-        use_reward_to_go: bool,
-        baseline_learning_rate: Optional[float],
-        baseline_gradient_steps: Optional[int],
-        gae_lambda: Optional[float],
-        normalize_advantages: bool,
+            self,
+            ob_dim: int,
+            ac_dim: int,
+            discrete: bool,
+            n_layers: int,
+            layer_size: int,
+            gamma: float,
+            learning_rate: float,
+            use_baseline: bool,
+            use_reward_to_go: bool,
+            baseline_learning_rate: Optional[float],
+            baseline_gradient_steps: Optional[int],
+            gae_lambda: Optional[float],
+            normalize_advantages: bool,
     ):
         super().__init__()
 
@@ -48,11 +48,11 @@ class PGAgent(nn.Module):
         self.normalize_advantages = normalize_advantages
 
     def update(
-        self,
-        obs: Sequence[np.ndarray],
-        actions: Sequence[np.ndarray],
-        rewards: Sequence[np.ndarray],
-        terminals: Sequence[np.ndarray],
+            self,
+            obs: Sequence[np.ndarray],
+            actions: Sequence[np.ndarray],
+            rewards: Sequence[np.ndarray],
+            terminals: Sequence[np.ndarray],
     ) -> dict:
         """The train step for PG involves updating its actor using the given observations/actions and the calculated
         qvals/advantages that come from the seen rewards.
@@ -68,6 +68,12 @@ class PGAgent(nn.Module):
         # way. obs, actions, rewards, terminals, and q_values should all be arrays with a leading dimension of `batch_size`
         # beyond this point.
 
+        obs = np.concatenate(obs)
+        actions = np.concatenate(actions)
+        rewards = np.concatenate(rewards)
+        terminals = np.concatenate(terminals)
+        q_values = np.concatenate(q_values)
+
         # step 2: calculate advantages from Q values
         advantages: np.ndarray = self._estimate_advantage(
             obs, rewards, q_values, terminals
@@ -75,13 +81,14 @@ class PGAgent(nn.Module):
 
         # step 3: use all datapoints (s_t, a_t, adv_t) to update the PG actor/policy
         # TODO: update the PG actor/policy network once using the advantages
-        info: dict = None
+        info: dict = self.actor.update(obs, actions, advantages)
 
         # step 4: if needed, use all datapoints (s_t, a_t, q_t) to update the PG critic/baseline
         if self.critic is not None:
             # TODO: perform `self.baseline_gradient_steps` updates to the critic/baseline network
-            critic_info: dict = None
-
+            for _ in range(self.baseline_gradient_steps):
+                critic_loss = self.critic.update(obs, q_values)
+            critic_info = {'Critic Loss': critic_loss}
             info.update(critic_info)
 
         return info
@@ -94,21 +101,22 @@ class PGAgent(nn.Module):
             # trajectory at each point.
             # In other words: Q(s_t, a_t) = sum_{t'=0}^T gamma^t' r_{t'}
             # TODO: use the helper function self._discounted_return to calculate the Q-values
-            q_values = None
+            q_values = [self._discounted_return(rewards[i]) for i in range(len(rewards))]
         else:
             # Case 2: in reward-to-go PG, we only use the rewards after timestep t to estimate the Q-value for (s_t, a_t).
             # In other words: Q(s_t, a_t) = sum_{t'=t}^T gamma^(t'-t) * r_{t'}
             # TODO: use the helper function self._discounted_reward_to_go to calculate the Q-values
-            q_values = None
+            q_values = [self._discounted_reward_to_go(rewards[i]) for i in range(len(rewards))]
+            other = [self._discounted_reward_to_go_alternative(rewards[i]) for i in range(len(rewards))]
 
         return q_values
 
     def _estimate_advantage(
-        self,
-        obs: np.ndarray,
-        rewards: np.ndarray,
-        q_values: np.ndarray,
-        terminals: np.ndarray,
+            self,
+            obs: np.ndarray,
+            rewards: np.ndarray,
+            q_values: np.ndarray,
+            terminals: np.ndarray,
     ) -> np.ndarray:
         """Computes advantages by (possibly) subtracting a value baseline from the estimated Q-values.
 
@@ -116,15 +124,15 @@ class PGAgent(nn.Module):
         """
         if self.critic is None:
             # TODO: if no baseline, then what are the advantages?
-            advantages = None
+            advantages = q_values
         else:
             # TODO: run the critic and use it as a baseline
-            values = None
+            values = self.critic.predict(obs).flatten()
             assert values.shape == q_values.shape
 
             if self.gae_lambda is None:
                 # TODO: if using a baseline, but not GAE, what are the advantages?
-                advantages = None
+                advantages = q_values - values
             else:
                 # TODO: implement GAE
                 batch_size = obs.shape[0]
@@ -144,7 +152,7 @@ class PGAgent(nn.Module):
 
         # TODO: normalize the advantages to have a mean of zero and a standard deviation of one within the batch
         if self.normalize_advantages:
-            pass
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         return advantages
 
@@ -156,12 +164,36 @@ class PGAgent(nn.Module):
         Note that all entries of the output list should be the exact same because each sum is from 0 to T (and doesn't
         involve t)!
         """
-        return None
-
+        discounted_total = 0
+        for t, r in enumerate(rewards):
+            discounted_total += (self.gamma ** t) * r
+        return [discounted_total] * len(rewards)
 
     def _discounted_reward_to_go(self, rewards: Sequence[float]) -> Sequence[float]:
         """
         Helper function which takes a list of rewards {r_0, r_1, ..., r_t', ... r_T} and returns a list where the entry
         in each index t' is sum_{t'=t}^T gamma^(t'-t) * r_{t'}.
         """
-        return None
+        discounted_rewards = []
+        for t_current in range(len(rewards)):
+            discounted_total = 0
+            for t_future, r in enumerate(rewards[t_current:]):
+                discounted_total += (self.gamma ** t_future) * r
+            discounted_rewards.append(discounted_total)
+        return discounted_rewards
+
+    def _discounted_reward_to_go_alternative(self, rewards: Sequence[float]) -> Sequence[float]:
+        """
+        Helper function which takes a list of rewards {r_0, r_1, ..., r_t', ... r_T} and returns a list where the entry
+        in each index t' is sum_{t'=t}^T gamma^(t'-t) * r_{t'}.
+        """
+        n = len(rewards)
+        discounted_rewards_to_go = [0] * n
+
+        # Start from the end of the episode and work backwards
+        running_add = 0
+        for t in reversed(range(n)):
+            running_add = running_add * self.gamma + rewards[t]
+            discounted_rewards_to_go[t] = running_add
+
+        return discounted_rewards_to_go
